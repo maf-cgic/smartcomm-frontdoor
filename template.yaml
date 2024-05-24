@@ -1,0 +1,134 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: Serverless architecture for document processing with a front-door API Gateway, event-driven Lambda functions, and DynamoDB.
+
+Globals:
+  Function:
+    Timeout: 300
+    Runtime: python3.11
+    MemorySize: 1024
+    Environment:
+      Variables:
+        SMARTCOMM_ENDPOINT: 'https://api.smartcomm.com/generate'
+        DYNAMODB_TABLE_NAME: 'DocumentRetentionTable'
+
+Resources:
+  ApiGateway:
+    Type: 'AWS::Serverless::Api'
+    Properties:
+      Name: DocumentProcessingAPI
+      StageName: dev
+      Cors:
+        AllowMethods: "'POST,OPTIONS'"
+        AllowHeaders: "'Content-Type'"
+        AllowOrigin: "'*'"
+      EndpointConfiguration: REGIONAL
+      MethodSettings:
+        - HttpMethod: "*"
+          ResourcePath: "/*"
+          LoggingLevel: INFO
+          DataTraceEnabled: true
+
+  ValidatePayloadFunction:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: validate_payload.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        ApiGateway:
+          Type: Api
+          Properties:
+            Path: /validate
+            Method: POST
+
+  DocumentGenerationQueue:
+    Type: 'AWS::SQS::Queue'
+    Properties:
+      QueueName: 'DocumentGenerationQueue'
+
+  GenerateDocumentFunction:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: generate_document.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          SQS_QUEUE_URL: !Ref DocumentGenerationQueue
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt DocumentGenerationQueue.Arn
+
+  FinalizeQueue:
+    Type: 'AWS::SQS::Queue'
+    Properties:
+      QueueName: 'FinalizeQueue'
+
+  FinalizeDocumentFunction:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: finalize_document.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          SQS_QUEUE_URL: !Ref FinalizeQueue
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt FinalizeQueue.Arn
+
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - s3:GetObject
+                  - s3:PutObject
+                  - sqs:SendMessage
+                  - dynamodb:Query
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                Resource: '*'
+
+  DocumentRetentionTable:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      TableName: 'DocumentRetentionTable'
+      AttributeDefinitions:
+        - AttributeName: "TemplateID"
+          AttributeType: "N"
+      KeySchema:
+        - AttributeName: "TemplateID"
+          KeyType: "HASH"
+      BillingMode: PAY_PER_REQUEST
+
+Outputs:
+  ApiGatewayInvokeURL:
+    Description: 'API Gateway Invoke URL'
+    Value: !Sub 'https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${Stage}'
+  DocumentGenerationQueueURL:
+    Description: 'URL of the SQS queue for document generation'
+    Value: !GetAtt DocumentGenerationQueue.QueueUrl
+  FinalizeQueueURL:
+    Description: 'URL of the SQS queue for finalizing documents'
+    Value: !GetAtt FinalizeQueue.QueueUrl
+  DocumentRetentionTableName:
+    Description: 'DynamoDB table for storing document metadata'
+    Value: !Ref DocumentRetentionTable
